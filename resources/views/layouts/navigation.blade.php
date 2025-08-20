@@ -25,6 +25,11 @@
                             <i class="fas fa-users text-sm"></i>
                             <span>User Management</span>
                         </x-nav-link>
+                        
+                        <x-nav-link :href="route('system.update')" :active="request()->routeIs('system.*')" class="flex items-center space-x-2">
+                            <i class="fas fa-sync-alt text-sm"></i>
+                            <span>System Update</span>
+                        </x-nav-link>
                     @endif
                     
                     <x-nav-link :href="route('whatsapp.devices.index')" :active="request()->routeIs('whatsapp.devices.*')" class="flex items-center space-x-2">
@@ -110,6 +115,11 @@
                 <x-responsive-nav-link :href="route('users.index')" :active="request()->routeIs('users.*')" class="flex items-center space-x-2">
                     <i class="fas fa-users text-sm"></i>
                     <span>User Management</span>
+                </x-responsive-nav-link>
+                
+                <x-responsive-nav-link :href="route('system.update')" :active="request()->routeIs('system.*')" class="flex items-center space-x-2">
+                    <i class="fas fa-sync-alt text-sm"></i>
+                    <span>System Update</span>
                 </x-responsive-nav-link>
             @endif
             

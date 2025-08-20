@@ -3,6 +3,7 @@
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\UserManagementController;
 use App\Http\Controllers\WhatsAppDeviceController;
+use App\Http\Controllers\SystemUpdateController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', function () {
@@ -30,6 +31,16 @@ Route::middleware(['auth', 'check.user.active'])->group(function () {
         Route::get('/users-pending-approval', [UserManagementController::class, 'pendingApproval'])->name('users.pending-approval');
         Route::post('/users/{user}/approve', [UserManagementController::class, 'approve'])->name('users.approve');
         Route::post('/users/{user}/reject', [UserManagementController::class, 'reject'])->name('users.reject');
+        
+        // System Update Routes
+        Route::prefix('system')->name('system.')->group(function () {
+            Route::get('/update', [SystemUpdateController::class, 'index'])->name('update');
+            Route::post('/check-updates', [SystemUpdateController::class, 'checkUpdates'])->name('check-updates');
+            Route::post('/perform-update', [SystemUpdateController::class, 'performUpdate'])->name('perform-update');
+            Route::post('/create-backup', [SystemUpdateController::class, 'createBackup'])->name('create-backup');
+            Route::post('/restore-backup', [SystemUpdateController::class, 'restoreBackup'])->name('restore-backup');
+            Route::delete('/delete-backup', [SystemUpdateController::class, 'deleteBackup'])->name('delete-backup');
+        });
     });
     
     // WhatsApp Device Management Routes
