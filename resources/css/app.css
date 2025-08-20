@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles for auth pages */
+.container-auth {
+    max-width: 400px;
+    margin: 0 auto;
+    padding: 1.5rem;
+}
+
+.input-auth {
+    width: 100%;
+    padding: 0.75rem 1rem 0.75rem 2.5rem;
+    border: 1px solid #d1d5db;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+}
+
+.btn-primary {
+    background: linear-gradient(to right, #4f46e5, #4338ca);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    font-weight: 500;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    transition: all 150ms;
+}
+
+.btn-primary:hover {
+    background: linear-gradient(to right, #4338ca, #3730a3);
+    transform: translateY(-1px);
+}
+
+/* Responsive adjustments */
+@media (max-width: 640px) {
+    .container-auth {
+        padding: 1rem;
+    }
+}
