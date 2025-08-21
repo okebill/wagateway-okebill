@@ -18,7 +18,8 @@
         <script src="https://kit.fontawesome.com/a076d05399.js" crossorigin="anonymous"></script>
 
         <!-- Scripts -->
-        @vite(['resources/css/app.css', 'resources/js/app.js'])
+        <link rel="stylesheet" href="{{ asset('build/assets/app-Bxd6PVSa.css') }}">
+        <script src="{{ asset('build/assets/app-DtCVKgHt.js') }}" defer></script>
         
         <!-- Fallback CSS in case Vite assets don't load -->
         <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
