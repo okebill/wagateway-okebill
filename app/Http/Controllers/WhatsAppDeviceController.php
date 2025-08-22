@@ -624,11 +624,13 @@ class WhatsAppDeviceController extends Controller
                 if ($data['success']) {
                     // Log the message for tracking
                     $device->messages()->create([
+                        'message_id' => $data['messageId'] ?? 'msg_' . time() . '_' . uniqid(),
+                        'chat_id' => $whatsappId,
                         'to_number' => $whatsappId,
                         'content' => $validated['message'],
                         'direction' => 'outgoing',
                         'status' => 'sent',
-                        'whatsapp_message_id' => $data['messageId'] ?? null,
+                        'sent_at' => now(),
                     ]);
 
                     // MPWA Compatible Response Format
