@@ -346,29 +346,29 @@ class SystemUpdateController extends Controller
     private function pullFromGitHub()
     {
         try {
-            // Check if .git directory exists
-            if (!File::exists(base_path('.git'))) {
-                // If not a git repository, download as zip
+            // Check if .git directory exists and proc_open is available
+            if (!File::exists(base_path('.git')) || !function_exists('proc_open')) {
+                // If not a git repository or proc_open not available, download as zip
+                $this->logUpdate("Git not available or proc_open disabled, using ZIP download method");
                 return $this->downloadFromGitHub();
             }
             
-            // Pull latest changes
+            // Try to pull latest changes
             $result = Process::run('git pull origin main', base_path());
             
             if ($result->successful()) {
                 return [
                     'success' => true,
-                    'message' => 'Code updated from GitHub'
+                    'message' => 'Code updated from GitHub via git pull'
                 ];
             } else {
-                throw new \Exception('Git pull failed: ' . $result->errorOutput());
+                $this->logUpdate("Git pull failed, falling back to ZIP download: " . $result->errorOutput());
+                return $this->downloadFromGitHub();
             }
             
         } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'message' => $e->getMessage()
-            ];
+            $this->logUpdate("Git pull error, falling back to ZIP download: " . $e->getMessage());
+            return $this->downloadFromGitHub();
         }
     }
 
@@ -424,14 +424,40 @@ class SystemUpdateController extends Controller
 
     private function updateDependencies()
     {
-        // Update PHP dependencies
-        if (File::exists(base_path('composer.json'))) {
-            Process::run('composer install --no-dev --optimize-autoloader', base_path());
-        }
-        
-        // Update Node.js dependencies
-        if (File::exists(base_path('package.json'))) {
-            Process::run('npm install --production', base_path());
+        try {
+            // Skip dependency updates if proc_open is not available
+            if (!function_exists('proc_open')) {
+                $this->logUpdate("Skipping dependency updates: proc_open not available");
+                return;
+            }
+
+            // Update PHP dependencies
+            if (File::exists(base_path('composer.json'))) {
+                $this->logUpdate("Updating PHP dependencies...");
+                try {
+                    $result = Process::run('composer install --no-dev --optimize-autoloader', base_path());
+                    if (!$result->successful()) {
+                        $this->logUpdate("Composer update failed: " . $result->errorOutput());
+                    }
+                } catch (\Exception $e) {
+                    $this->logUpdate("Composer update error: " . $e->getMessage());
+                }
+            }
+            
+            // Update Node.js dependencies
+            if (File::exists(base_path('package.json'))) {
+                $this->logUpdate("Updating Node.js dependencies...");
+                try {
+                    $result = Process::run('npm install --production', base_path());
+                    if (!$result->successful()) {
+                        $this->logUpdate("NPM update failed: " . $result->errorOutput());
+                    }
+                } catch (\Exception $e) {
+                    $this->logUpdate("NPM update error: " . $e->getMessage());
+                }
+            }
+        } catch (\Exception $e) {
+            $this->logUpdate("Dependency update error: " . $e->getMessage());
         }
     }
 
