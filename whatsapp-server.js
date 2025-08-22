@@ -46,6 +46,7 @@ async function initializeWhatsAppClient(deviceKey, socket = null) {
         }),
         puppeteer: {
             headless: true,
+            executablePath: '/usr/bin/google-chrome-stable',
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -53,7 +54,13 @@ async function initializeWhatsAppClient(deviceKey, socket = null) {
                 '--disable-accelerated-2d-canvas',
                 '--no-first-run',
                 '--no-zygote',
-                '--disable-gpu'
+                '--disable-gpu',
+                '--disable-extensions',
+                '--disable-plugins',
+                '--disable-images',
+                '--disable-javascript',
+                '--disable-default-apps',
+                '--disable-sync'
             ]
         }
     });
