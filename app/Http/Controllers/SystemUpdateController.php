@@ -311,14 +311,25 @@ class SystemUpdateController extends Controller
             $context = stream_context_create([
                 'http' => [
                     'method' => 'GET',
-                    'header' => 'User-Agent: WhatsApp-Gateway/1.0'
+                    'header' => [
+                        'User-Agent: WhatsApp-Gateway/1.0',
+                        'Accept: application/vnd.github.v3+json'
+                    ],
+                    'timeout' => 10
                 ]
             ]);
             
             $response = @file_get_contents($url, false, $context);
             if ($response) {
-                $data = json_decode($response, true);
-                return substr($data['sha'] ?? 'unknown', 0, 7); // Short hash
+                // Validate that response is JSON, not HTML error page
+                $data = @json_decode($response, true);
+                if ($data && json_last_error() === JSON_ERROR_NONE) {
+                    return substr($data['sha'] ?? 'unknown', 0, 7); // Short hash
+                } else {
+                    $this->logUpdate("GitHub API returned invalid JSON: " . substr($response, 0, 200));
+                }
+            } else {
+                $this->logUpdate("Failed to fetch data from GitHub API");
             }
         } catch (\Exception $e) {
             $this->logUpdate("Error fetching latest version: " . $e->getMessage());
