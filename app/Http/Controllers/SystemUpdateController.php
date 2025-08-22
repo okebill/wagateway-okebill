@@ -378,8 +378,11 @@ class SystemUpdateController extends Controller
             $zipUrl = 'https://github.com/okebill/wagateway-okebill/archive/refs/heads/main.zip';
             $tempFile = storage_path('temp/github-update.zip');
             
-            // Create temp directory
-            File::makeDirectory(dirname($tempFile), 0755, true);
+            // Create temp directory if it doesn't exist
+            $tempDir = dirname($tempFile);
+            if (!File::exists($tempDir)) {
+                File::makeDirectory($tempDir, 0755, true);
+            }
             
             // Download zip file
             $zipContent = file_get_contents($zipUrl);
@@ -393,6 +396,12 @@ class SystemUpdateController extends Controller
             $zip = new \ZipArchive();
             if ($zip->open($tempFile) === TRUE) {
                 $extractPath = storage_path('temp/extracted');
+                
+                // Clean up any existing extracted files first
+                if (File::exists($extractPath)) {
+                    File::deleteDirectory($extractPath);
+                }
+                
                 $zip->extractTo($extractPath);
                 $zip->close();
                 
@@ -402,9 +411,13 @@ class SystemUpdateController extends Controller
                     $this->copyDirectory($sourceDir, base_path());
                 }
                 
-                // Cleanup
-                File::delete($tempFile);
-                File::deleteDirectory($extractPath);
+                // Cleanup temp files
+                if (File::exists($tempFile)) {
+                    File::delete($tempFile);
+                }
+                if (File::exists($extractPath)) {
+                    File::deleteDirectory($extractPath);
+                }
                 
                 return [
                     'success' => true,
@@ -415,6 +428,17 @@ class SystemUpdateController extends Controller
             }
             
         } catch (\Exception $e) {
+            // Cleanup temp files on error
+            $tempFile = storage_path('temp/github-update.zip');
+            $extractPath = storage_path('temp/extracted');
+            
+            if (File::exists($tempFile)) {
+                @File::delete($tempFile);
+            }
+            if (File::exists($extractPath)) {
+                @File::deleteDirectory($extractPath);
+            }
+            
             return [
                 'success' => false,
                 'message' => $e->getMessage()
