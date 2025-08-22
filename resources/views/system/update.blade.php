@@ -250,6 +250,17 @@
                     }
                 });
 
+                // Check if response is actually JSON before parsing
+                const contentType = response.headers.get('content-type');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                if (!contentType || !contentType.includes('application/json')) {
+                    const textResponse = await response.text();
+                    throw new Error(`Server returned HTML instead of JSON: ${textResponse.substring(0, 100)}...`);
+                }
+
                 const data = await response.json();
 
                 if (data.success) {
@@ -298,6 +309,17 @@
                     }
                 });
 
+                // Check if response is actually JSON before parsing
+                const contentType = response.headers.get('content-type');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                if (!contentType || !contentType.includes('application/json')) {
+                    const textResponse = await response.text();
+                    throw new Error(`Server returned HTML instead of JSON: ${textResponse.substring(0, 100)}...`);
+                }
+
                 const data = await response.json();
 
                 if (data.success) {
@@ -329,6 +351,17 @@
                         'X-CSRF-TOKEN': '{{ csrf_token() }}'
                     }
                 });
+
+                // Check if response is actually JSON before parsing
+                const contentType = response.headers.get('content-type');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                if (!contentType || !contentType.includes('application/json')) {
+                    const textResponse = await response.text();
+                    throw new Error(`Server returned HTML instead of JSON: ${textResponse.substring(0, 100)}...`);
+                }
 
                 const data = await response.json();
 
@@ -364,6 +397,17 @@
                     })
                 });
 
+                // Check if response is actually JSON before parsing
+                const contentType = response.headers.get('content-type');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                if (!contentType || !contentType.includes('application/json')) {
+                    const textResponse = await response.text();
+                    throw new Error(`Server returned HTML instead of JSON: ${textResponse.substring(0, 100)}...`);
+                }
+
                 const data = await response.json();
 
                 if (data.success) {
@@ -395,6 +439,17 @@
                         backup_name: backupName
                     })
                 });
+
+                // Check if response is actually JSON before parsing
+                const contentType = response.headers.get('content-type');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                if (!contentType || !contentType.includes('application/json')) {
+                    const textResponse = await response.text();
+                    throw new Error(`Server returned HTML instead of JSON: ${textResponse.substring(0, 100)}...`);
+                }
 
                 const data = await response.json();
 
