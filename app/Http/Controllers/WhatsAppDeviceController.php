@@ -799,7 +799,7 @@ class WhatsAppDeviceController extends Controller
                     // Log the message for tracking
                     try {
                         $device->messages()->create([
-                            'message_id' => $data['messageId'] ?? 'msg_' . time(),
+                            'message_id' => $data['messageId'] ?? 'msg_' . time() . '_' . uniqid(),
                             'chat_id' => $whatsappId,
                             'to_number' => $whatsappId,
                             'content' => $validated['message'],
