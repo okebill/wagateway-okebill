@@ -1,7 +1,6 @@
 <x-guest-layout>
     <div class="mb-10">
-        <h1 class="text-3xl font-bold text-gray-900">Selamat Datang</h1>
-        <p class="mt-2 text-base text-gray-600">Masuk ke akun Anda untuk melanjutkan</p>
+        <h1 class="text-3xl font-bold text-gray-900"><center>Eglobaltechno</center></h1>
     </div>
     
     <!-- Session Status -->
@@ -91,44 +90,9 @@
                 <div class="w-full border-t border-gray-300"></div>
             </div>
             <div class="relative flex justify-center text-sm">
-                <span class="px-2 bg-white text-gray-500">atau</span>
             </div>
-        </div>
-        
-        <!-- Register Link -->
-        <div class="text-center">
-            <p class="text-gray-600 mb-4">Belum punya akun?</p>
-            <a href="{{ route('register') }}" 
-               class="inline-block w-full py-3 px-4 border border-indigo-600 rounded-lg text-indigo-600 font-medium hover:bg-indigo-50 transition-colors duration-150 ease-in-out text-center">
-                <i class="fas fa-user-plus mr-2"></i>
-                Daftar Sekarang
-            </a>
         </div>
     </form>
-    
-    <!-- Demo Account Info -->
-    <div class="mt-8 bg-gradient-to-r from-indigo-50 to-blue-50 rounded-lg overflow-hidden">
-        <div class="px-5 py-4 border border-indigo-100">
-            <div class="flex items-start">
-                <div class="flex-shrink-0 pt-0.5">
-                    <i class="fas fa-info-circle text-indigo-500"></i>
-                </div>
-                <div class="ml-3">
-                    <h3 class="text-sm font-medium text-indigo-800">Akun Demo</h3>
-                    <div class="mt-2 text-sm text-indigo-700 space-y-1">
-                        <p class="flex">
-                            <span class="font-semibold w-20">Email:</span> 
-                            <code class="bg-white px-1.5 py-0.5 rounded border border-indigo-100 font-mono">test@example.com</code>
-                        </p>
-                        <p class="flex">
-                            <span class="font-semibold w-20">Password:</span> 
-                            <code class="bg-white px-1.5 py-0.5 rounded border border-indigo-100 font-mono">password</code>
-                        </p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
     
     <!-- Security Badge -->
     <div class="mt-8 text-center">

@@ -54,16 +54,22 @@ Route::middleware(['auth', 'check.user.active'])->group(function () {
         Route::post('/devices/{device}/sync-contacts', [WhatsAppDeviceController::class, 'syncContacts'])->name('devices.sync-contacts');
         Route::get('/devices/{device}/contacts', [WhatsAppDeviceController::class, 'contacts'])->name('devices.contacts');
         Route::get('/devices/{device}/api-info', [WhatsAppDeviceController::class, 'apiInfo'])->name('devices.api-info');
+        Route::get('/devices/{device}/web-interface', [WhatsAppDeviceController::class, 'webInterface'])->name('devices.web-interface');
+        Route::get('/devices/{device}/recent-chats', [WhatsAppDeviceController::class, 'getRecentChats'])->name('devices.recent-chats');
+        Route::get('/devices/{device}/messages/{chatId}', [WhatsAppDeviceController::class, 'getChatMessages'])->name('devices.messages');
     });
 });
 
 require __DIR__.'/auth.php';
 
-// API Routes for external integrations (like Mikrotik) - MPWA Compatible
+// API Routes for external integrations (MPWA Compatible) - No CSRF needed
+// These routes are in web.php but excluded from CSRF in bootstrap/app.php
 Route::get('/send-message', [WhatsAppDeviceController::class, 'sendMessageApi'])->name('api.send-message');
-Route::get('/api/send-message', [WhatsAppDeviceController::class, 'sendMessageApi'])->name('api.send-message-alt');
 Route::post('/send-message', [WhatsAppDeviceController::class, 'sendMessageApi'])->name('api.send-message-post');
+Route::get('/api/send-message', [WhatsAppDeviceController::class, 'sendMessageApi'])->name('api.send-message-alt');
 Route::post('/api/send-message', [WhatsAppDeviceController::class, 'sendMessageApi'])->name('api.send-message-post-alt');
+
+// API Route moved to routes/api.php (no CSRF protection needed)
 
 // Mock WhatsApp Server Routes (for testing when Node.js server is not available)
 Route::prefix('mock-whatsapp')->group(function () {

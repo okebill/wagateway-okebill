@@ -44,13 +44,30 @@
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 mb-2">Device Phone</label>
                                 <div class="flex items-center space-x-2">
-                                    <input type="text" value="{{ $device->phone_number ?: 'Device not connected' }}" readonly class="flex-1 px-3 py-2 border border-gray-300 rounded-md bg-gray-50 text-sm">
+                                    @php
+                                        $phoneDisplay = $device->phone_number 
+                                            ? $device->phone_number 
+                                            : ($device->isConnected() 
+                                                ? 'Phone number unavailable (WhatsApp API limitation)' 
+                                                : 'Device not connected');
+                                    @endphp
+                                    <input type="text" value="{{ $phoneDisplay }}" readonly class="flex-1 px-3 py-2 border border-gray-300 rounded-md bg-gray-50 text-sm {{ $device->isConnected() && !$device->phone_number ? 'text-orange-600' : '' }}">
                                     @if($device->phone_number)
                                         <button onclick="copyToClipboard('{{ $device->phone_number }}')" class="px-3 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors duration-200">
                                             <i class="fas fa-copy"></i>
                                         </button>
+                                    @elseif($device->isConnected())
+                                        <span class="px-3 py-2 bg-orange-100 text-orange-700 rounded-md text-sm">
+                                            <i class="fas fa-info-circle"></i> Connected
+                                        </span>
                                     @endif
                                 </div>
+                                @if($device->isConnected() && !$device->phone_number)
+                                    <p class="mt-1 text-xs text-orange-600">
+                                        <i class="fas fa-exclamation-triangle"></i> 
+                                        Device is connected and functional, but phone number is not available due to WhatsApp Web API limitations. You can still send and receive messages.
+                                    </p>
+                                @endif
                             </div>
                         </div>
                     </div>

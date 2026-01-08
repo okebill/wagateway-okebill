@@ -239,6 +239,43 @@ class WhatsAppDeviceController extends Controller
         $this->authorize('view', $device);
 
         try {
+            // First check if WhatsApp server is running
+            try {
+                $healthCheck = Http::timeout(5)->get("http://localhost:3001/health");
+                
+                if (!$healthCheck->successful()) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'WhatsApp server tidak berjalan. Pastikan server Node.js berjalan di port 3001.',
+                        'error_type' => 'server_down'
+                    ]);
+                }
+            } catch (\Illuminate\Http\Client\ConnectionException $e) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'WhatsApp server tidak berjalan. Pastikan server Node.js berjalan di port 3001. Jalankan: npm run whatsapp-server',
+                    'error_type' => 'server_down'
+                ]);
+            }
+
+            // Check if device is connected/connecting
+            $statusResponse = Http::timeout(10)->get("http://localhost:3001/api/device/{$device->device_key}/status");
+            
+            if ($statusResponse->successful()) {
+                $statusData = $statusResponse->json();
+                
+                // If device is not initialized, we need to connect first
+                if (isset($statusData['status']) && $statusData['status'] === 'disconnected' && 
+                    (!isset($statusData['deviceKey']) || $statusData['message'] === 'Device not initialized')) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Device belum di-connect. Silakan klik tombol "Connect & Generate QR" terlebih dahulu.',
+                        'error_type' => 'device_not_connected',
+                        'needs_connect' => true
+                    ]);
+                }
+            }
+
             // Get QR code from Real WhatsApp server
             $response = Http::timeout(30)->get("http://localhost:3001/api/qr/{$device->device_key}");
             
@@ -259,18 +296,30 @@ class WhatsAppDeviceController extends Controller
                         ],
                     ]);
                 } else {
+                    // QR code not available - might be expired or not generated yet
+                    $message = $data['message'] ?? 'QR code belum tersedia. Pastikan device sudah di-connect dan tunggu beberapa detik.';
+                    
                     return response()->json([
                         'success' => false,
-                        'message' => $data['message'] ?? 'No QR code available'
+                        'message' => $message,
+                        'error_type' => 'qr_not_available',
+                        'needs_connect' => $device->isDisconnected()
                     ]);
                 }
             } else {
-                throw new \Exception('WhatsApp server tidak merespons');
+                throw new \Exception('WhatsApp server tidak merespons dengan status: ' . $response->status());
             }
+        } catch (\Illuminate\Http\Client\ConnectionException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Tidak dapat terhubung ke WhatsApp server. Pastikan server Node.js berjalan di port 3001. Jalankan: npm run whatsapp-server',
+                'error_type' => 'connection_failed'
+            ]);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Gagal mendapatkan QR code: ' . $e->getMessage()
+                'message' => 'Gagal mendapatkan QR code: ' . $e->getMessage(),
+                'error_type' => 'unknown_error'
             ]);
         }
     }
@@ -296,14 +345,32 @@ class WhatsAppDeviceController extends Controller
                         'last_seen' => now(),
                     ];
                     
-                    // Update phone number if connected
-                    if ($data['status'] === 'connected' && isset($data['deviceInfo']['phone'])) {
-                        $updateData['phone_number'] = $data['deviceInfo']['phone'];
-                        $updateData['connected_at'] = now();
-                        $updateData['device_info'] = $data['deviceInfo'];
+                    // If status is connected
+                    if ($data['status'] === 'connected') {
+                        // Always clear QR code and errors when connected
+                        $updateData['qr_code'] = null;
+                        $updateData['error_message'] = null;
+                        
+                        // Update phone number if available
+                        if (isset($data['deviceInfo']['phone'])) {
+                            $updateData['phone_number'] = $data['deviceInfo']['phone'];
+                            $updateData['device_info'] = $data['deviceInfo'];
+                            \Log::info("Device {$device->device_key} phone number updated: {$data['deviceInfo']['phone']}");
+                        } else {
+                            \Log::info("Device {$device->device_key} connected but phone number not available");
+                        }
+                        
+                        // Update connected_at if status changed or if not set yet
+                        if ($device->status !== 'connected' || !$device->connected_at) {
+                            $updateData['connected_at'] = now();
+                            \Log::info("Device {$device->device_key} status changed to connected at " . now());
+                        }
                     }
                     
                     $device->update($updateData);
+                    
+                    // Log the update
+                    \Log::info("Device {$device->device_key} status updated in database: " . $data['status']);
                     
                     return response()->json([
                         'success' => true,
@@ -350,8 +417,18 @@ class WhatsAppDeviceController extends Controller
             'message' => ['required', 'string', 'max:4096'],
         ]);
 
+        // Refresh device data from database to get latest status
+        $device->refresh();
+        
+        \Log::info("📤 Send message called for device: {$device->device_key}", [
+            'device_status' => $device->status,
+            'recipient' => $validated['phone_number'],
+            'message_length' => strlen($validated['message'])
+        ]);
+
         // Check if device is connected
         if (!$device->isConnected()) {
+            \Log::warning("Send message failed: Device {$device->device_key} is not connected (status: {$device->status})");
             return redirect()->route('whatsapp.devices.index')
                 ->with('error', 'Device harus dalam status connected untuk mengirim pesan.');
         }
@@ -382,28 +459,95 @@ class WhatsAppDeviceController extends Controller
                 $whatsappId = $phoneNumber . '@c.us';
             }
 
+            \Log::info("Sending request to Node.js server", [
+                'url' => "http://localhost:3001/api/device/{$device->device_key}/send-message",
+                'whatsapp_id' => $whatsappId
+            ]);
+            
             // Send message to WhatsApp server
             $response = Http::timeout(30)->post("http://localhost:3001/api/device/{$device->device_key}/send-message", [
                 'to' => $whatsappId,
                 'message' => $validated['message']
             ]);
 
+            \Log::info("Node.js response received", [
+                'status' => $response->status(),
+                'success' => $response->successful()
+            ]);
+
             if ($response->successful()) {
                 $data = $response->json();
+                
+                \Log::info("Response data", [
+                    'success' => $data['success'] ?? false,
+                    'message_id' => $data['messageId'] ?? null
+                ]);
                 
                 if ($data['success']) {
                     // Determine success message based on recipient type
                     $recipientName = str_contains($whatsappId, '@g.us') ? 'grup' : $recipientId;
+                    
+                    \Log::info("✅ Message sent successfully to {$recipientName}", [
+                        'message_id' => $data['messageId'] ?? null,
+                        'timestamp' => $data['timestamp'] ?? null
+                    ]);
+                    
+                    // Save message to database
+                    try {
+                        $messageRecord = $device->messages()->create([
+                            'message_id' => $data['messageId'] ?? null,
+                            'chat_id' => $whatsappId,
+                            'direction' => 'outgoing',
+                            'type' => 'text',
+                            'status' => 'sent',
+                            'content' => $validated['message'],
+                            'from_number' => $device->phone_number,
+                            'to_number' => $whatsappId,
+                            'is_group' => str_contains($whatsappId, '@g.us'),
+                            'sent_at' => now(),
+                            'metadata' => [
+                                'timestamp' => $data['timestamp'] ?? null,
+                                'sent_via_api' => true,
+                            ]
+                        ]);
+                        
+                        \Log::info("💾 Message saved to database", [
+                            'db_id' => $messageRecord->id,
+                            'message_id' => $messageRecord->message_id,
+                            'chat_id' => $messageRecord->chat_id
+                        ]);
+                    } catch (\Exception $saveError) {
+                        // Log error but don't fail the request
+                        \Log::error("⚠️ Failed to save message to database: " . $saveError->getMessage(), [
+                            'exception' => get_class($saveError),
+                            'trace' => $saveError->getTraceAsString()
+                        ]);
+                    }
+                    
                     return redirect()->route('whatsapp.devices.index')
                         ->with('success', "Pesan berhasil dikirim ke {$recipientName}!");
                 } else {
+                    \Log::error("❌ Node.js returned success=false", [
+                        'message' => $data['message'] ?? 'Unknown error'
+                    ]);
+                    
                     return redirect()->route('whatsapp.devices.index')
                         ->with('error', 'Gagal mengirim pesan: ' . ($data['message'] ?? 'Unknown error'));
                 }
             } else {
-                throw new \Exception('WhatsApp server tidak merespons');
+                \Log::error("WhatsApp server returned non-successful status", [
+                    'status' => $response->status(),
+                    'body' => $response->body()
+                ]);
+                throw new \Exception('WhatsApp server tidak merespons (HTTP ' . $response->status() . ')');
             }
         } catch (\Exception $e) {
+            \Log::error("❌ Send message exception for device {$device->device_key}: " . $e->getMessage(), [
+                'exception' => get_class($e),
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]);
+            
             return redirect()->route('whatsapp.devices.index')
                 ->with('error', 'Gagal mengirim pesan: ' . $e->getMessage());
         }
@@ -416,46 +560,65 @@ class WhatsAppDeviceController extends Controller
     {
         $this->authorize('view', $device);
 
+        // Refresh device data from database to get latest status
+        $device->refresh();
+        
+        \Log::info("Sync contacts called for device: {$device->device_key}, current status: {$device->status}");
+
         // Check if device is connected
         if (!$device->isConnected()) {
+            \Log::warning("Sync contacts failed: Device {$device->device_key} is not connected (status: {$device->status})");
             return response()->json([
                 'success' => false,
-                'message' => 'Device harus dalam status connected untuk sinkronisasi kontak.'
+                'message' => 'Device not connected. Status: ' . $device->status
             ]);
         }
 
         try {
+            \Log::info("Sending request to Node.js server: GET http://localhost:3001/api/device/{$device->device_key}/contacts");
+            
             // Get contacts from WhatsApp server
             $response = Http::timeout(60)->get("http://localhost:3001/api/device/{$device->device_key}/contacts");
 
+            \Log::info("Node.js response status: " . $response->status());
+            
             if ($response->successful()) {
                 $data = $response->json();
+                \Log::info("Response data received", ['success' => $data['success'] ?? false, 'contacts_count' => count($data['contacts'] ?? [])]);
                 
                 if ($data['success']) {
                     $contacts = $data['contacts'];
                     $syncedCount = 0;
 
+                    \Log::info("Starting to sync " . count($contacts) . " contacts to database...");
+
                     // Save contacts and groups to database
                     foreach ($contacts as $contactData) {
-                        $device->contacts()->updateOrCreate(
-                            [
-                                'device_id' => $device->id,
-                                'whatsapp_id' => $contactData['id'] ?? null,
-                            ],
-                            [
-                                'name' => $contactData['name'] ?? null,
-                                'phone_number' => $contactData['number'] ?? null,
-                                'push_name' => $contactData['pushname'] ?? null,
-                                'is_my_contact' => $contactData['isMyContact'] ?? false,
-                                'is_group' => $contactData['isGroup'] ?? false,
-                                'group_participants' => isset($contactData['groupMetadata']) ? $contactData['groupMetadata']['participants'] ?? null : null,
-                                'profile_picture_url' => $contactData['profilePicUrl'] ?? null,
-                                'metadata' => $contactData['groupMetadata'] ?? null,
-                                'last_synced_at' => now(),
-                            ]
-                        );
-                        $syncedCount++;
+                        try {
+                            $device->contacts()->updateOrCreate(
+                                [
+                                    'device_id' => $device->id,
+                                    'whatsapp_id' => $contactData['id'] ?? null,
+                                ],
+                                [
+                                    'name' => $contactData['name'] ?? null,
+                                    'phone_number' => $contactData['number'] ?? null,
+                                    'push_name' => $contactData['pushname'] ?? null,
+                                    'is_my_contact' => $contactData['isMyContact'] ?? false,
+                                    'is_group' => $contactData['isGroup'] ?? false,
+                                    'group_participants' => isset($contactData['groupMetadata']) ? $contactData['groupMetadata']['participants'] ?? null : null,
+                                    'profile_picture_url' => $contactData['profilePicUrl'] ?? null,
+                                    'metadata' => $contactData['groupMetadata'] ?? null,
+                                    'last_synced_at' => now(),
+                                ]
+                            );
+                            $syncedCount++;
+                        } catch (\Exception $contactErr) {
+                            \Log::warning("Failed to sync contact: " . $contactErr->getMessage(), ['contact_id' => $contactData['id'] ?? 'unknown']);
+                        }
                     }
+
+                    \Log::info("✅ Sync completed successfully! Synced {$syncedCount} contacts for device {$device->device_key}");
 
                     return response()->json([
                         'success' => true,
@@ -463,15 +626,22 @@ class WhatsAppDeviceController extends Controller
                         'count' => $syncedCount
                     ]);
                 } else {
+                    \Log::error("Node.js returned success=false", ['message' => $data['message'] ?? 'unknown']);
                     return response()->json([
                         'success' => false,
                         'message' => $data['message'] ?? 'Gagal mengambil kontak dari WhatsApp'
                     ]);
                 }
             } else {
-                throw new \Exception('WhatsApp server tidak merespons');
+                \Log::error("WhatsApp server returned non-successful status", ['status' => $response->status(), 'body' => $response->body()]);
+                throw new \Exception('WhatsApp server tidak merespons (HTTP ' . $response->status() . ')');
             }
         } catch (\Exception $e) {
+            \Log::error("❌ Sync contacts exception for device {$device->device_key}: " . $e->getMessage(), [
+                'exception' => get_class($e),
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]);
             return response()->json([
                 'success' => false,
                 'message' => 'Gagal sinkronisasi kontak: ' . $e->getMessage()
@@ -546,7 +716,7 @@ class WhatsAppDeviceController extends Controller
         $input = $request->all();
         
         // If POST with JSON body, merge with request data
-        if ($request->isMethod('post') && $request->getContentType() === 'json') {
+        if ($request->isMethod('post') && $request->isJson()) {
             $jsonData = $request->json()->all();
             $input = array_merge($input, $jsonData);
         }
@@ -579,13 +749,17 @@ class WhatsAppDeviceController extends Controller
                 ], 401);
             }
 
-            // Check if device is connected
-            if (!$device->isConnected()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Device not connected'
-                ], 400);
-            }
+        // Refresh device data from database to get latest status
+        $device->refresh();
+        
+        // Check if device is connected
+        if (!$device->isConnected()) {
+            \Log::warning("Send message failed: Device {$device->device_key} is not connected (status: {$device->status})");
+            return response()->json([
+                'success' => false,
+                'message' => 'Device not connected. Current status: ' . $device->status . '. Please wait for device to connect.'
+            ], 400);
+        }
 
             // Process phone numbers like MPWA (support 72888xxxx|62888xxxx format)
             $senderNumber = $this->normalizePhoneNumber($validated['sender']);
@@ -623,13 +797,26 @@ class WhatsAppDeviceController extends Controller
                 
                 if ($data['success']) {
                     // Log the message for tracking
-                    $device->messages()->create([
-                        'to_number' => $whatsappId,
-                        'content' => $validated['message'],
-                        'direction' => 'outgoing',
-                        'status' => 'sent',
-                        'whatsapp_message_id' => $data['messageId'] ?? null,
-                    ]);
+                    try {
+                        $device->messages()->create([
+                            'message_id' => $data['messageId'] ?? 'msg_' . time(),
+                            'chat_id' => $whatsappId,
+                            'to_number' => $whatsappId,
+                            'content' => $validated['message'],
+                            'direction' => 'outgoing',
+                            'type' => 'text',
+                            'status' => 'sent',
+                            'from_number' => $device->phone_number ?? $validated['sender'],
+                            'sent_at' => now(),
+                            'metadata' => [
+                                'sent_via_api' => true,
+                                'timestamp' => $data['timestamp'] ?? time(),
+                            ]
+                        ]);
+                    } catch (\Exception $saveError) {
+                        // Log error but don't fail the request
+                        \Log::error("Failed to save outgoing message to database: " . $saveError->getMessage());
+                    }
 
                     // MPWA Compatible Response Format
                     return response()->json([
@@ -656,6 +843,13 @@ class WhatsAppDeviceController extends Controller
             }
 
         } catch (\Exception $e) {
+            \Log::error("❌ Error in sendMessageApi: " . $e->getMessage(), [
+                'exception' => get_class($e),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
             return response()->json([
                 'success' => false,
                 'message' => 'Server error: ' . $e->getMessage()
@@ -694,5 +888,333 @@ class WhatsAppDeviceController extends Controller
         
         // Default: assume Indonesian if not recognized
         return '62' . $number;
+    }
+
+    /**
+     * Display WhatsApp Web Interface for the device
+     */
+    public function webInterface(WhatsappDevice $device)
+    {
+        $this->authorize('view', $device);
+
+        // Check if device is connected
+        if (!$device->isConnected()) {
+            return redirect()->route('whatsapp.devices.index')
+                ->with('error', 'Device harus dalam status connected untuk menggunakan Web Interface.');
+        }
+
+        // Get recent chats (from messages grouped by chat_id)
+        $recentChats = $device->messages()
+            ->select('chat_id', 'to_number', 'is_group')
+            ->selectRaw('MAX(created_at) as last_message_time')
+            ->selectRaw('COUNT(*) as message_count')
+            ->groupBy('chat_id', 'to_number', 'is_group')
+            ->orderByDesc('last_message_time')
+            ->limit(50)
+            ->get();
+
+        // Get contacts for quick access
+        $contacts = $device->contacts()
+            ->orderBy('name')
+            ->limit(100)
+            ->get();
+
+        return view('whatsapp.devices.web-interface', compact('device', 'recentChats', 'contacts'));
+    }
+
+    /**
+     * Get recent chats for web interface (API endpoint for auto-refresh)
+     */
+    public function getRecentChats(WhatsappDevice $device)
+    {
+        $this->authorize('view', $device);
+
+        try {
+            // Get all unique chat_ids with their latest message info
+            $allChats = $device->messages()
+                ->select('chat_id', 'to_number', 'is_group', 'created_at', 'content')
+                ->orderByDesc('created_at')
+                ->get();
+            
+            // Group by normalized chat_id (convert @lid to @c.us)
+            $groupedChats = [];
+            foreach ($allChats as $msg) {
+                $normalizedChatId = str_replace('@lid', '@c.us', $msg->chat_id);
+                
+                if (!isset($groupedChats[$normalizedChatId])) {
+                    $groupedChats[$normalizedChatId] = [
+                        'chat_id' => $normalizedChatId,
+                        'to_number' => $msg->to_number,
+                        'is_group' => $msg->is_group,
+                        'last_message_time' => $msg->created_at,
+                        'last_message_preview' => $msg->content,
+                        'message_count' => 0
+                    ];
+                }
+                
+                $groupedChats[$normalizedChatId]['message_count']++;
+                
+                // Update if this message is newer
+                if ($msg->created_at > $groupedChats[$normalizedChatId]['last_message_time']) {
+                    $groupedChats[$normalizedChatId]['last_message_time'] = $msg->created_at;
+                    $groupedChats[$normalizedChatId]['last_message_preview'] = $msg->content;
+                }
+            }
+            
+            // Convert to array and sort by last_message_time
+            $recentChats = collect($groupedChats)
+                ->sortByDesc('last_message_time')
+                ->take(50)
+                ->map(function ($chat) {
+                    return [
+                        'chat_id' => $chat['chat_id'],
+                        'to_number' => $chat['to_number'],
+                        'is_group' => $chat['is_group'],
+                        'last_message_time' => $chat['last_message_time'],
+                        'last_message_time_formatted' => \Carbon\Carbon::parse($chat['last_message_time'])->diffForHumans(),
+                        'message_count' => $chat['message_count'],
+                        'last_message_preview' => \Illuminate\Support\Str::limit($chat['last_message_preview'], 50)
+                    ];
+                })
+                ->values();
+
+            return response()->json([
+                'success' => true,
+                'chats' => $recentChats
+            ]);
+        } catch (\Exception $e) {
+            \Log::error("Error getting recent chats: " . $e->getMessage());
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal mengambil daftar chat: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Get messages for a specific chat
+     */
+    public function getChatMessages(WhatsappDevice $device, $chatId)
+    {
+        $this->authorize('view', $device);
+
+        try {
+            // Decode chat ID if it's URL encoded
+            $chatId = urldecode($chatId);
+            
+            // Normalize chat_id - handle both @lid and @c.us formats
+            $normalizedChatId = $chatId;
+            if (str_contains($normalizedChatId, '@lid')) {
+                $normalizedChatId = str_replace('@lid', '@c.us', $normalizedChatId);
+            }
+
+            // Get messages for this chat - try both original and normalized chat_id
+            $messages = $device->messages()
+                ->where(function($query) use ($chatId, $normalizedChatId) {
+                    $query->where('chat_id', $chatId)
+                          ->orWhere('chat_id', $normalizedChatId);
+                })
+                ->orderBy('created_at', 'asc')
+                ->limit(100)
+                ->get()
+                ->map(function ($message) {
+                    return [
+                        'id' => $message->id,
+                        'message_id' => $message->message_id,
+                        'direction' => $message->direction,
+                        'type' => $message->type,
+                        'content' => $message->content,
+                        'sent_at' => $message->sent_at,
+                        'created_at' => $message->created_at,
+                        'from_number' => $message->from_number,
+                        'to_number' => $message->to_number,
+                    ];
+                });
+
+            return response()->json([
+                'success' => true,
+                'messages' => $messages
+            ]);
+        } catch (\Exception $e) {
+            \Log::error("Error getting messages for chat {$chatId}: " . $e->getMessage());
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal mengambil pesan: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Save incoming message from Node.js server (API endpoint)
+     */
+    public function saveIncomingMessage(Request $request)
+    {
+        try {
+            \Log::info("📥 Incoming message webhook received", [
+                'device_key' => $request->device_key,
+                'message_id' => $request->message_id,
+                'from' => $request->from_number,
+                'to' => $request->to_number,
+                'chat_id' => $request->chat_id,
+                'direction' => $request->direction,
+                'content_preview' => \Illuminate\Support\Str::limit($request->content ?? '', 50)
+            ]);
+
+            // Find device by device_key
+            $device = WhatsappDevice::where('device_key', $request->device_key)->first();
+            
+            if (!$device) {
+                \Log::error("Device not found: {$request->device_key}");
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Device not found'
+                ], 404);
+            }
+
+            // Check if message already exists (prevent duplicates)
+            $existingMessage = $device->messages()
+                ->where('message_id', $request->message_id)
+                ->first();
+
+            if ($existingMessage) {
+                \Log::info("Message already exists, skipping: {$request->message_id}");
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Message already exists',
+                    'message_id' => $existingMessage->id,
+                    'duplicate' => true
+                ]);
+            }
+
+            // Normalize chat_id - convert @lid to @c.us or @g.us
+            $chatId = $request->chat_id;
+            if ($chatId && str_contains($chatId, '@lid')) {
+                // Convert @lid to @c.us for individual chats
+                $chatId = str_replace('@lid', '@c.us', $chatId);
+                \Log::info("🔄 Normalized chat_id from {$request->chat_id} to {$chatId}");
+            }
+            
+            // Skip system messages like status@broadcast
+            if ($chatId && (str_contains($chatId, 'status@broadcast') || str_contains($chatId, '@broadcast'))) {
+                \Log::info("⏭️  Skipping system/broadcast message: {$chatId}");
+                return response()->json([
+                    'success' => true,
+                    'message' => 'System message skipped',
+                    'skipped' => true
+                ]);
+            }
+            
+            // Also normalize from_number and to_number if needed
+            $fromNumber = $request->from_number;
+            if ($fromNumber && str_contains($fromNumber, '@lid')) {
+                $fromNumber = str_replace('@lid', '@c.us', $fromNumber);
+            }
+            
+            $toNumber = $request->to_number;
+            if ($toNumber && str_contains($toNumber, '@lid')) {
+                $toNumber = str_replace('@lid', '@c.us', $toNumber);
+            }
+
+            // Validate required fields
+            if (empty($chatId)) {
+                \Log::warning("Empty chat_id, using from_number as fallback");
+                $chatId = $fromNumber ?: 'unknown';
+            }
+            
+            if (empty($request->message_id)) {
+                \Log::warning("Empty message_id, generating one");
+                $messageId = 'msg_' . time() . '_' . uniqid();
+            } else {
+                $messageId = $request->message_id;
+            }
+            
+            // Normalize message type - map WhatsApp types to database ENUM values
+            $messageType = $request->type ?? 'text';
+            $validTypes = ['text', 'image', 'document', 'audio', 'video', 'location', 'contact', 'sticker'];
+            
+            // Map common WhatsApp types to valid database types
+            $typeMapping = [
+                'chat' => 'text',        // WhatsApp "chat" type = text message
+                'ptt' => 'audio',        // Push-to-talk = audio
+                'ptv' => 'video',        // Push-to-talk video = video
+                'gif' => 'image',        // GIF = image
+                'media' => 'image',       // Generic media = image
+            ];
+            
+            if (isset($typeMapping[$messageType])) {
+                $messageType = $typeMapping[$messageType];
+                \Log::info("🔄 Mapped message type from {$request->type} to {$messageType}");
+            } elseif (!in_array($messageType, $validTypes)) {
+                \Log::warning("⚠️  Invalid message type '{$messageType}', defaulting to 'text'");
+                $messageType = 'text';
+            }
+            
+            // Normalize status - map to valid database ENUM values
+            $messageStatus = $request->status ?? 'pending';
+            $validStatuses = ['pending', 'sent', 'delivered', 'read', 'failed', 'received'];
+            
+            // Map "received" to "pending" for incoming messages
+            if ($messageStatus === 'received') {
+                $messageStatus = 'pending';
+            } elseif (!in_array($messageStatus, ['pending', 'sent', 'delivered', 'read', 'failed'])) {
+                $messageStatus = 'pending';
+            }
+
+            // Create new message record
+            try {
+                $message = $device->messages()->create([
+                    'message_id' => $messageId,
+                    'chat_id' => $chatId,
+                    'direction' => $request->direction ?? 'incoming',
+                    'type' => $messageType,
+                    'status' => $messageStatus,
+                    'content' => $request->content ?? '',
+                    'from_number' => $fromNumber ?? $chatId,
+                    'to_number' => $toNumber ?? $device->phone_number,
+                    'is_group' => $request->is_group ?? false,
+                    'sent_at' => $request->timestamp ? \Carbon\Carbon::createFromTimestamp($request->timestamp) : now(),
+                    'metadata' => $request->metadata ?? null
+                ]);
+            } catch (\Exception $createError) {
+                \Log::error("❌ Failed to create message record: " . $createError->getMessage(), [
+                    'exception' => get_class($createError),
+                    'trace' => $createError->getTraceAsString(),
+                    'data' => [
+                        'message_id' => $messageId,
+                        'chat_id' => $chatId,
+                        'from_number' => $fromNumber,
+                        'to_number' => $toNumber
+                    ]
+                ]);
+                throw $createError;
+            }
+
+            \Log::info("✅ Incoming message saved successfully", [
+                'db_id' => $message->id,
+                'message_id' => $message->message_id,
+                'chat_id' => $message->chat_id
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Message saved successfully',
+                'message_id' => $message->id
+            ]);
+
+        } catch (\Exception $e) {
+            \Log::error("❌ Error saving incoming message: " . $e->getMessage(), [
+                'exception' => get_class($e),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to save message: ' . $e->getMessage()
+            ], 500);
+        }
     }
 }

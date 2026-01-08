@@ -137,6 +137,13 @@
                             <i class="fas fa-edit"></i>
                         </a>
 
+                                        <!-- WhatsApp Web Interface (only if connected) -->
+                                        @if($device->isConnected())
+                                            <a href="{{ route('whatsapp.devices.web-interface', $device) }}" class="text-emerald-600 hover:text-emerald-900 transition-colors duration-200" title="WhatsApp Web Interface" target="_blank">
+                                                <i class="fas fa-globe"></i>
+                                            </a>
+                                        @endif
+
                                         <!-- Send Message (only if connected) -->
                                         @if($device->isConnected())
                                             <button onclick="openMessageModal('{{ $device->id }}', '{{ $device->device_name }}', '{{ $device->phone_number }}')" class="text-blue-600 hover:text-blue-900 transition-colors duration-200" title="Send Message">

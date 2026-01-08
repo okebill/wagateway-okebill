@@ -14,7 +14,15 @@
                                 <i class="fas fa-mobile-alt text-green-600"></i>
                                 <span>{{ $device->device_name }}</span>
                             </h1>
-                            <p class="mt-2 text-gray-600">{{ $device->phone_number ?: 'Device not connected yet' }}</p>
+                            @if($device->phone_number)
+                                <p class="mt-2 text-gray-600">{{ $device->phone_number }}</p>
+                            @elseif($device->isConnected())
+                                <p class="mt-2 text-orange-600">
+                                    <i class="fas fa-check-circle"></i> Connected - Phone number unavailable
+                                </p>
+                            @else
+                                <p class="mt-2 text-gray-600">Device not connected yet</p>
+                            @endif
                         </div>
                     </div>
                     
@@ -82,10 +90,10 @@
                                         </div>
                                         <div id="qr-error" class="hidden">
                                             <div class="mx-auto w-64 h-64 border-4 border-red-200 rounded-lg shadow-lg flex items-center justify-center bg-red-50">
-                                                <div class="text-center">
+                                                <div class="text-center px-4">
                                                     <i class="fas fa-exclamation-triangle text-4xl text-red-400 mb-4"></i>
-                                                    <p class="text-red-500">Failed to load QR Code</p>
-                                                    <button onclick="refreshQR()" class="mt-2 text-sm text-blue-600 hover:text-blue-800">Try Again</button>
+                                                    <p class="text-red-500 text-sm mb-2">Failed to load QR Code</p>
+                                                    <button onclick="refreshQR()" class="mt-2 text-sm text-blue-600 hover:text-blue-800 underline">Try Again</button>
                                                 </div>
                                             </div>
                                         </div>
@@ -353,9 +361,19 @@
         // Initialize Socket.IO connection
         function initializeSocket() {
             try {
-                socket = io('http://localhost:3001', {
-                    timeout: 5000,
-                    transports: ['websocket', 'polling']
+                // Detect Socket.IO server URL (use same host as current page)
+                const socketUrl = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
+                    ? 'http://localhost:3001' 
+                    : `http://${window.location.hostname}:3001`;
+                
+                console.log('Connecting to Socket.IO server:', socketUrl);
+                
+                socket = io(socketUrl, {
+                    timeout: 10000,
+                    transports: ['websocket', 'polling'],
+                    reconnection: true,
+                    reconnectionDelay: 1000,
+                    reconnectionAttempts: 5
                 });
 
                 socket.on('connect', function() {
@@ -383,8 +401,16 @@
 
                 // Listen for connection status updates
                 socket.on(`status-${deviceKey}`, function(data) {
-                    console.log('Status update:', data);
+                    console.log('Status update via Socket.IO:', data);
                     updateDeviceStatus(data);
+                    
+                    // If status is connected, reload page
+                    if (data.status === 'connected') {
+                        console.log('Device connected via Socket.IO! Reloading...');
+                        setTimeout(() => {
+                            location.reload();
+                        }, 1000);
+                    }
                 });
 
                 // Listen for successful connection
@@ -454,10 +480,19 @@
             document.getElementById('qr-image-container').classList.add('hidden');
         }
 
-        function showQRError() {
+        function showQRError(message = 'Failed to load QR Code') {
             document.getElementById('qr-loading').classList.add('hidden');
             document.getElementById('qr-error').classList.remove('hidden');
             document.getElementById('qr-image-container').classList.add('hidden');
+            
+            // Update error message if provided
+            const errorDiv = document.getElementById('qr-error');
+            if (errorDiv && message !== 'Failed to load QR Code') {
+                const errorText = errorDiv.querySelector('p.text-red-500');
+                if (errorText) {
+                    errorText.textContent = message;
+                }
+            }
         }
 
         function updateDeviceStatus(data) {
@@ -466,6 +501,31 @@
             if (statusElement) {
                 // Update status display
                 console.log('Status updated:', data.status, data.message);
+            }
+            
+            // If status is connected, show notification and reload
+            if (data.status === 'connected') {
+                console.log('Device connected detected! Phone:', data.phone_number || data.deviceInfo?.phone);
+                
+                // Show success message
+                const container = document.getElementById('qr-container');
+                if (container) {
+                    container.innerHTML = `
+                        <div class="mx-auto w-64 h-64 border-4 border-green-200 rounded-lg shadow-lg flex items-center justify-center bg-green-50">
+                            <div class="text-center">
+                                <i class="fas fa-check-circle text-5xl text-green-500 mb-4"></i>
+                                <h3 class="text-lg font-medium text-green-800 mb-2">Connected!</h3>
+                                <p class="text-sm text-green-600">Phone: ${data.phone_number || data.deviceInfo?.phone || 'N/A'}</p>
+                                <p class="text-xs text-green-500 mt-2">Reloading page...</p>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                // Reload page after short delay
+                setTimeout(() => {
+                    location.reload();
+                }, 1500);
             }
         }
 
@@ -501,30 +561,53 @@
             
             // First ensure device is connected to WhatsApp server
             connectDeviceIfNeeded().then(() => {
-                // Then fetch QR code
-                fetch('{{ route("whatsapp.devices.qr-code", $device) }}')
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.success && data.qr_code) {
-                            displayQRCode(data.qr_code.code);
-                            startCountdown();
-                        } else {
-                            showQRError();
-                            console.error('QR Error:', data.message);
-                        }
-                    })
-                    .catch(error => {
-                        console.error('QR Fetch Error:', error);
-                        showQRError();
-                    })
-                    .finally(() => {
-                        if (icon) icon.classList.remove('fa-spin');
-                    });
+                // Wait a bit for QR code to be generated
+                setTimeout(() => {
+                    // Then fetch QR code
+                    fetch('{{ route("whatsapp.devices.qr-code", $device) }}')
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.success && data.qr_code) {
+                                displayQRCode(data.qr_code.code);
+                                startCountdown();
+                            } else {
+                                showQRError(data.message || 'Gagal memuat QR code');
+                                console.error('QR Error:', data.message);
+                                
+                                // If device needs to be connected, show helpful message
+                                if (data.needs_connect && data.error_type === 'device_not_connected') {
+                                    showQRConnectionHint();
+                                }
+                            }
+                        })
+                        .catch(error => {
+                            console.error('QR Fetch Error:', error);
+                            showQRError('Terjadi kesalahan saat mengambil QR code. Pastikan WhatsApp server berjalan.');
+                        })
+                        .finally(() => {
+                            if (icon) icon.classList.remove('fa-spin');
+                        });
+                }, 2000); // Wait 2 seconds for QR generation
             }).catch(error => {
                 console.error('Connect Error:', error);
-                showQRError();
+                showQRError('Gagal menghubungkan device. Pastikan WhatsApp server berjalan di port 3001.');
                 if (icon) icon.classList.remove('fa-spin');
             });
+        }
+        
+        function showQRConnectionHint() {
+            const errorDiv = document.getElementById('qr-error');
+            if (errorDiv) {
+                const hint = document.createElement('div');
+                hint.className = 'mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg';
+                hint.innerHTML = `
+                    <p class="text-sm text-yellow-800 mb-2">
+                        <i class="fas fa-info-circle mr-2"></i>
+                        <strong>Tips:</strong> Klik tombol "Connect & Generate QR" di bawah untuk memulai koneksi.
+                    </p>
+                `;
+                errorDiv.appendChild(hint);
+            }
         }
 
         function connectDeviceIfNeeded() {
@@ -566,17 +649,40 @@
         }
 
         function checkStatus() {
+            const statusButton = document.querySelector('button[onclick="checkStatus()"]');
+            if (statusButton) {
+                const icon = statusButton.querySelector('i');
+                if (icon) icon.classList.add('fa-spin');
+            }
+            
             fetch('{{ route("whatsapp.devices.status", $device) }}')
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
+                        console.log('Status check result:', data);
                         updateDeviceStatus(data);
+                        
+                        // If connected, reload page immediately
                         if (data.status === 'connected') {
+                            console.log('Device is connected! Reloading page...');
                             location.reload();
+                        } else if (data.status === 'connecting') {
+                            // Still connecting, check again soon
+                            console.log('Device still connecting...');
                         }
+                    } else {
+                        console.error('Status check failed:', data.message);
                     }
                 })
-                .catch(error => console.error('Status Error:', error));
+                .catch(error => {
+                    console.error('Status Error:', error);
+                })
+                .finally(() => {
+                    if (statusButton) {
+                        const icon = statusButton.querySelector('i');
+                        if (icon) icon.classList.remove('fa-spin');
+                    }
+                });
         }
 
         function copyToClipboard(text) {
@@ -594,11 +700,33 @@
                 
                 // Wait for socket connection then get QR code
                 setTimeout(() => {
-                    refreshQR();
+                    // If device is disconnected, try to connect first
+                    if ('{{ $device->status }}' === 'disconnected') {
+                        console.log('Device is disconnected, attempting to connect...');
+                        connectDeviceIfNeeded().then(() => {
+                            // Wait a bit longer for QR generation after connection
+                            setTimeout(() => {
+                                refreshQR();
+                            }, 3000);
+                        }).catch(error => {
+                            console.error('Auto-connect failed:', error);
+                            // Still try to refresh QR in case it's already available
+                            setTimeout(() => {
+                                refreshQR();
+                            }, 2000);
+                        });
+                    } else {
+                        // Device is already connecting, just refresh QR
+                        refreshQR();
+                    }
                 }, 1000);
                 
-                // Auto-check status every 10 seconds
-                setInterval(checkStatus, 10000);
+                // Auto-check status every 5 seconds (more aggressive polling)
+                // This is important as fallback if Socket.IO doesn't work
+                setInterval(checkStatus, 5000);
+                
+                // Also check status immediately
+                setTimeout(checkStatus, 2000);
             @endif
         });
 
