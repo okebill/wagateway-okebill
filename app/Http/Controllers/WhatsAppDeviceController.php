@@ -766,11 +766,18 @@ class WhatsAppDeviceController extends Controller
             $deviceNumber = $this->normalizePhoneNumber($device->phone_number ?? '');
             
             // Verify sender matches device phone (if device has phone number)
+            // RELAXED VALIDATION: Only log warning but still allow sending
+            // This allows flexibility when device phone number is not set or incorrect
             if ($deviceNumber && $senderNumber !== $deviceNumber) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Sender number does not match device phone number'
-                ], 400);
+                \Log::warning("Sender number mismatch", [
+                    'device_key' => $device->device_key,
+                    'device_phone' => $deviceNumber,
+                    'sender_requested' => $senderNumber,
+                    'note' => 'Sending anyway - device might be multi-number or phone not synced'
+                ]);
+                
+                // Don't block - just log and continue
+                // Some devices may support multiple numbers or phone number not synced yet
             }
 
             // Process recipient number

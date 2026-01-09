@@ -314,7 +314,14 @@ async function initializeWhatsAppClient(deviceKey, socket = null) {
         
         log(`   Emitted Socket.IO event: disconnected-${deviceKey}`, 'info');
     });
-
+    
+    // Contact added event - log when new contacts are added
+    client.on('contact_changed', async (contact, oldContact) => {
+        log(`👤 Contact changed for device: ${deviceKey}`, 'info');
+        log(`   ID: ${contact.id._serialized}`, 'info');
+        log(`   Name: ${contact.name || contact.pushname || 'Unknown'}`, 'info');
+    });
+    
     // Message received event
     client.on('message', async (message) => {
         log(`💬 Message received for device: ${deviceKey}`, 'info');
@@ -693,6 +700,103 @@ function updateDeviceStatus(deviceKey, status, message = '', deviceInfo = null) 
     if (deviceInfo) {
         log(`   Phone: ${deviceInfo.phone || 'N/A'}`, 'info');
         log(`   Name: ${deviceInfo.pushname || 'N/A'}`, 'info');
+    }
+}
+
+// Helper function to check if number exists on WhatsApp and get proper ID
+async function getNumberId(client, chatId) {
+    log(`🔍 Checking if number exists on WhatsApp: ${chatId}`, 'info');
+    
+    try {
+        // Method 1: Try getNumberId (most reliable for WhatsApp Web.js)
+        try {
+            const numberId = await client.getNumberId(chatId.replace('@c.us', ''));
+            if (numberId) {
+                log(`   ✅ Number is registered on WhatsApp: ${numberId._serialized}`, 'success');
+                return numberId._serialized;
+            }
+        } catch (err) {
+            log(`   ⚠️  getNumberId failed: ${err.message}`, 'warn');
+        }
+        
+        // Method 2: Try isRegisteredUser
+        try {
+            const isRegistered = await client.isRegisteredUser(chatId);
+            if (isRegistered) {
+                log(`   ✅ Number is registered (via isRegisteredUser)`, 'success');
+                return chatId;
+            } else {
+                log(`   ❌ Number is NOT registered on WhatsApp`, 'error');
+                return null;
+            }
+        } catch (err) {
+            log(`   ⚠️  isRegisteredUser failed: ${err.message}`, 'warn');
+        }
+        
+        // Method 3: Try to get contact
+        try {
+            const contact = await client.getContactById(chatId);
+            if (contact) {
+                log(`   ✅ Contact found: ${contact.id._serialized}`, 'success');
+                return contact.id._serialized;
+            }
+        } catch (err) {
+            log(`   ⚠️  getContactById failed: ${err.message}`, 'warn');
+        }
+        
+        // If all methods fail, return original chatId and let send fail gracefully
+        log(`   ⚠️  Could not verify number, returning original ID: ${chatId}`, 'warn');
+        return chatId;
+        
+    } catch (error) {
+        log(`   ❌ Error in getNumberId: ${error.message}`, 'error');
+        return chatId; // Return original and let send handle the error
+    }
+}
+
+// Helper function to ensure contact exists before sending
+async function ensureContact(client, chatId) {
+    log(`🔐 Ensuring contact exists: ${chatId}`, 'info');
+    
+    try {
+        // Get verified number ID first
+        const verifiedId = await getNumberId(client, chatId);
+        
+        if (!verifiedId) {
+            log(`   ❌ Number not registered on WhatsApp`, 'error');
+            return null;
+        }
+        
+        // Try to get or create contact
+        try {
+            const contact = await client.getContactById(verifiedId);
+            if (contact) {
+                log(`   ✅ Contact exists: ${contact.name || contact.pushname || 'Unknown'}`, 'success');
+                
+                // Check if contact has LID issue
+                // Sometimes contact exists but LID is not available
+                // In this case, try to "ping" the contact by getting chat
+                try {
+                    const chat = await client.getChatById(verifiedId);
+                    if (chat) {
+                        log(`   ✅ Chat accessible, LID should be available`, 'success');
+                    }
+                } catch (chatErr) {
+                    log(`   ⚠️  Chat not accessible yet: ${chatErr.message}`, 'warn');
+                    log(`   💡 This might cause LID error, but will try anyway`, 'info');
+                }
+                
+                return verifiedId;
+            }
+        } catch (contactErr) {
+            log(`   ⚠️  Could not get contact: ${contactErr.message}`, 'warn');
+        }
+        
+        return verifiedId;
+        
+    } catch (error) {
+        log(`   ❌ Error in ensureContact: ${error.message}`, 'error');
+        return chatId; // Return original and let send handle
     }
 }
 
@@ -1143,7 +1247,7 @@ app.post('/api/device/:deviceKey/send-message', async (req, res) => {
             log(`   🔄 Normalized chat_id from ${recipient} to ${chatId}`, 'info');
         }
         
-        log(`   📱 Final chat ID: ${chatId}`, 'info');
+        log(`   📱 Initial chat ID: ${chatId}`, 'info');
         
         // Validate chat ID format (more flexible to handle various formats)
         // Allow: number@c.us, number@g.us, or any format with @
@@ -1151,6 +1255,21 @@ app.post('/api/device/:deviceKey/send-message', async (req, res) => {
             log(`   ❌ Invalid chat ID format: ${chatId}`, 'error');
             throw new Error(`Invalid chat ID format: ${chatId}. Must include @`);
         }
+        
+        // **FIX FOR "No LID for user" ERROR**
+        // Ensure contact exists and get verified ID before sending
+        // This prevents LID errors by verifying number is registered
+        log(`   🔐 Verifying number and ensuring contact exists...`, 'info');
+        const verifiedChatId = await ensureContact(client, chatId);
+        
+        if (!verifiedChatId) {
+            log(`   ❌ Number is not registered on WhatsApp: ${chatId}`, 'error');
+            throw new Error(`Number is not registered on WhatsApp: ${recipient}`);
+        }
+        
+        // Use verified chat ID for sending
+        chatId = verifiedChatId;
+        log(`   ✅ Using verified chat ID: ${chatId}`, 'success');
         
         // Send message with retry
         let sentMessage;
@@ -1173,16 +1292,47 @@ app.post('/api/device/:deviceKey/send-message', async (req, res) => {
                 retries++;
                 log(`   ⚠️  Attempt ${retries} failed: ${sendErr.message}`, 'warn');
                 log(`   ⚠️  Error name: ${sendErr.name}`, 'warn');
-                log(`   ⚠️  Error stack: ${sendErr.stack}`, 'warn');
                 
-                // Check if it's a specific error that we can handle
-                if (sendErr.message.includes('Evaluation failed')) {
+                // Check for specific error types
+                const errorMessage = sendErr.message.toLowerCase();
+                
+                // Check if it's the "No LID for user" error
+                if (errorMessage.includes('no lid for user')) {
+                    log(`   ⚠️  LID error detected - Number might not be in contacts or WhatsApp cache`, 'warn');
+                    log(`   💡 Possible causes:`, 'info');
+                    log(`      1. Number not in WhatsApp contacts`, 'info');
+                    log(`      2. Privacy settings prevent messages from non-contacts`, 'info');
+                    log(`      3. WhatsApp Web session needs to sync contacts`, 'info');
+                    
+                    // Try to force refresh contact before retry
+                    if (retries < maxRetries) {
+                        log(`   🔄 Attempting to refresh contact before retry...`, 'info');
+                        try {
+                            // Try to get contact again to refresh cache
+                            const contact = await client.getContactById(chatId);
+                            if (contact) {
+                                log(`   ✅ Contact refreshed: ${contact.name || contact.pushname}`, 'success');
+                            }
+                        } catch (refreshErr) {
+                            log(`   ⚠️  Contact refresh failed: ${refreshErr.message}`, 'warn');
+                        }
+                    }
+                } else if (errorMessage.includes('evaluation failed')) {
                     log(`   ⚠️  Browser evaluation error - might be temporary`, 'warn');
                     log(`   💡 This could indicate WhatsApp Web is still loading or chat doesn't exist`, 'info');
+                } else if (errorMessage.includes('phone number is not registered')) {
+                    log(`   ❌ CRITICAL: Number is not registered on WhatsApp`, 'error');
+                    throw new Error(`Number ${recipient} is not registered on WhatsApp`);
                 }
                 
                 if (retries >= maxRetries) {
                     log(`   ❌ Max retries reached. Send message failed`, 'error');
+                    
+                    // Provide helpful error message based on error type
+                    if (errorMessage.includes('no lid for user')) {
+                        throw new Error(`Failed to send message: Number ${recipient} might not be in contacts or has privacy settings that prevent messages. Please ensure: 1) Number is registered on WhatsApp, 2) Add number to contacts first, or 3) Recipient must message you first.`);
+                    }
+                    
                     throw new Error(`Failed to send message after ${maxRetries} attempts: ${sendErr.message}`);
                 }
                 
