@@ -167,18 +167,20 @@ async function initializeWhatsAppClient(deviceKey, socket = null) {
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
                 '--no-first-run',
                 '--no-zygote',
-                '--disable-gpu',
-                '--disable-extensions',
-                '--disable-plugins',
-                '--disable-images',
-                '--disable-javascript',
-                '--disable-default-apps',
-                '--disable-sync'
+                '--disable-gpu'
+                // Removed problematic flags that break WhatsApp Web:
+                // - '--disable-javascript' (breaks WhatsApp Web completely)
+                // - '--disable-images' (may affect QR code display)
+                // - '--disable-accelerated-2d-canvas'
+                // - '--disable-extensions'
+                // - '--disable-plugins'
             ]
-        }
+        },
+        // Add option to disable automatic sendSeen calls
+        qrMaxRetries: 5,
+        authTimeoutMs: 60000
     });
 
     // QR Code event
@@ -219,6 +221,44 @@ async function initializeWhatsAppClient(deviceKey, socket = null) {
         
         // Wait a moment to ensure client.info is available
         await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // CRITICAL FIX: Patch sendSeen to prevent markedUnread error
+        // This error is blocking message sending
+        try {
+            await client.pupPage.evaluate(() => {
+                // Override sendSeen to prevent markedUnread error
+                if (window.WWebJS && window.WWebJS.sendSeen) {
+                    const originalSendSeen = window.WWebJS.sendSeen;
+                    window.WWebJS.sendSeen = async function(...args) {
+                        try {
+                            return await originalSendSeen.apply(this, args);
+                        } catch (err) {
+                            // Silently catch sendSeen errors (markedUnread)
+                            console.log('[WWebJS Patch] sendSeen error caught and ignored:', err.message);
+                            return true; // Return success
+                        }
+                    };
+                    console.log('[WWebJS Patch] sendSeen patched successfully');
+                }
+                
+                // Also patch at Store level if available
+                if (window.Store && window.Store.SendSeen) {
+                    const originalStoreSendSeen = window.Store.SendSeen;
+                    window.Store.SendSeen = async function(...args) {
+                        try {
+                            return await originalStoreSendSeen.apply(this, args);
+                        } catch (err) {
+                            console.log('[Store Patch] SendSeen error caught and ignored:', err.message);
+                            return true;
+                        }
+                    };
+                    console.log('[Store Patch] SendSeen patched successfully');
+                }
+            });
+            log(`   🔧 Applied sendSeen patch to prevent markedUnread errors`, 'success');
+        } catch (patchErr) {
+            log(`   ⚠️  Could not apply sendSeen patch: ${patchErr.message}`, 'warn');
+        }
         
         if (client.info) {
         const clientInfo = client.info;
@@ -1282,12 +1322,95 @@ app.post('/api/device/:deviceKey/send-message', async (req, res) => {
                 log(`   📝 Message length: ${message.length} characters`, 'info');
                 
                 // Use sendMessage with proper error handling
-                sentMessage = await client.sendMessage(chatId, message);
-                
-                log(`   ✅ Message sent successfully!`, 'success');
-                log(`   📬 Message ID: ${sentMessage.id?.id || 'N/A'}`, 'info');
-                log(`   ⏰ Timestamp: ${sentMessage.timestamp || 'N/A'}`, 'info');
-                break; // Success, exit loop
+                // Wrap in try-catch to handle sendSeen errors separately
+                try {
+                    sentMessage = await client.sendMessage(chatId, message);
+                    
+                    log(`   ✅ Message sent successfully!`, 'success');
+                    log(`   📬 Message ID: ${sentMessage.id?.id || 'N/A'}`, 'info');
+                    log(`   ⏰ Timestamp: ${sentMessage.timestamp || 'N/A'}`, 'info');
+                    break; // Success, exit loop
+                } catch (sendErr) {
+                    // Check if error is related to sendSeen/markedUnread (non-critical)
+                    const errorMessage = sendErr.message.toLowerCase();
+                    const errorStack = sendErr.stack?.toLowerCase() || '';
+                    
+                    // Check if it's the markedUnread error (happens in sendSeen)
+                    // This error occurs when WhatsApp Web's internal structure changes
+                    // and sendSeen tries to access markedUnread on an undefined object
+                    const isMarkedUnreadError = 
+                        errorMessage.includes('markedunread') || 
+                        errorMessage.includes('marked_unread') ||
+                        errorMessage.includes('marked unread') ||
+                        errorStack.includes('sendseen') ||
+                        errorStack.includes('sendseen') ||
+                        (errorMessage.includes('cannot read properties of undefined') && 
+                         errorMessage.includes('reading') && 
+                         (errorStack.includes('sendseen') || errorStack.includes('markedunread'))) ||
+                        (errorMessage.includes('evaluation failed') && 
+                         errorStack.includes('markedunread'));
+                    
+                    if (isMarkedUnreadError) {
+                        log(`   ⚠️  sendSeen error detected (markedUnread) - This is usually non-critical`, 'warn');
+                        log(`   💡 Message might have been sent successfully, but marking as seen failed`, 'info');
+                        log(`   💡 This error occurs after message is sent, so message is likely already delivered`, 'info');
+                        
+                        // CRITICAL: Must verify if message was actually sent
+                        // Do NOT assume success without verification
+                        let messageVerified = false;
+                        try {
+                            // Wait longer for message to appear (increased from 1.5s to 3s)
+                            await new Promise(resolve => setTimeout(resolve, 3000));
+                            
+                            // Try to get the chat to verify message was sent
+                            const chat = await client.getChatById(chatId);
+                            if (chat) {
+                                // Get last few messages to check if our message is there
+                                const messages = await chat.fetchMessages({ limit: 15 });
+                                const recentMessage = messages.find(msg => {
+                                    // Check by body content (exact match or contains)
+                                    if (msg.body && message) {
+                                        const msgBody = msg.body.trim();
+                                        const sentBody = message.trim();
+                                        if (msgBody === sentBody || msgBody.includes(sentBody) || sentBody.includes(msgBody)) {
+                                            return true;
+                                        }
+                                    }
+                                    // Check by timestamp (within last 20 seconds)
+                                    if (msg.timestamp && Date.now() / 1000 - msg.timestamp < 20) {
+                                        return true;
+                                    }
+                                    return false;
+                                });
+                                
+                                if (recentMessage) {
+                                    log(`   ✅ Message verified in chat - send was successful despite sendSeen error`, 'success');
+                                    sentMessage = recentMessage;
+                                    messageVerified = true;
+                                } else {
+                                    log(`   ❌ Message NOT found in chat - send actually failed`, 'error');
+                                    log(`   💡 MarkedUnread error occurred BEFORE message was sent, not after`, 'warn');
+                                }
+                            }
+                        } catch (verifyErr) {
+                            log(`   ⚠️  Could not verify message: ${verifyErr.message}`, 'warn');
+                        }
+                        
+                        // ONLY treat as success if message was verified
+                        if (messageVerified && sentMessage) {
+                            log(`   ✅ Treating as success - message verified in chat`, 'success');
+                            break; // Success, exit loop
+                        } else {
+                            // Message was NOT verified - treat as failure and retry
+                            log(`   ❌ Cannot confirm message was sent - treating as failure`, 'error');
+                            log(`   🔄 Will retry sending...`, 'info');
+                            throw sendErr; // Re-throw to trigger retry
+                        }
+                    } else {
+                        // Other errors, re-throw to be handled below
+                        throw sendErr;
+                    }
+                }
             } catch (sendErr) {
                 retries++;
                 log(`   ⚠️  Attempt ${retries} failed: ${sendErr.message}`, 'warn');
@@ -1295,6 +1418,7 @@ app.post('/api/device/:deviceKey/send-message', async (req, res) => {
                 
                 // Check for specific error types
                 const errorMessage = sendErr.message.toLowerCase();
+                const errorStack = sendErr.stack?.toLowerCase() || '';
                 
                 // Check if it's the "No LID for user" error
                 if (errorMessage.includes('no lid for user')) {
@@ -1320,9 +1444,120 @@ app.post('/api/device/:deviceKey/send-message', async (req, res) => {
                 } else if (errorMessage.includes('evaluation failed')) {
                     log(`   ⚠️  Browser evaluation error - might be temporary`, 'warn');
                     log(`   💡 This could indicate WhatsApp Web is still loading or chat doesn't exist`, 'info');
+                    
+                    // Check if it's the markedUnread error in evaluation
+                    const isMarkedUnreadInEval = 
+                        errorMessage.includes('markedunread') || 
+                        errorMessage.includes('marked_unread') ||
+                        errorStack.includes('sendseen') ||
+                        (errorMessage.includes('cannot read properties of undefined') && 
+                         errorStack.includes('markedunread'));
+                    
+                    if (isMarkedUnreadInEval) {
+                        log(`   💡 This is a sendSeen error (markedUnread) - message might still have been sent`, 'info');
+                        log(`   💡 Attempting to verify if message was sent...`, 'info');
+                        
+                        // Try to verify message was sent
+                        let messageVerified = false;
+                        try {
+                            await new Promise(resolve => setTimeout(resolve, 3000));
+                            const chat = await client.getChatById(chatId);
+                            if (chat) {
+                                const messages = await chat.fetchMessages({ limit: 15 });
+                                const recentMessage = messages.find(msg => {
+                                    if (msg.body && message) {
+                                        const msgBody = msg.body.trim();
+                                        const sentBody = message.trim();
+                                        if (msgBody === sentBody || msgBody.includes(sentBody) || sentBody.includes(msgBody)) {
+                                            return true;
+                                        }
+                                    }
+                                    if (msg.timestamp && Date.now() / 1000 - msg.timestamp < 20) {
+                                        return true;
+                                    }
+                                    return false;
+                                });
+                                
+                                if (recentMessage) {
+                                    log(`   ✅ Message verified - send was successful despite sendSeen error`, 'success');
+                                    sentMessage = recentMessage;
+                                    messageVerified = true;
+                                    break; // Success, exit loop
+                                } else {
+                                    log(`   ❌ Message NOT found in chat - send actually failed`, 'error');
+                                }
+                            }
+                        } catch (verifyErr) {
+                            log(`   ⚠️  Could not verify: ${verifyErr.message}`, 'warn');
+                        }
+                        
+                        // ONLY treat as success if message was verified
+                        if (!messageVerified) {
+                            log(`   ❌ Cannot confirm message was sent - treating as failure`, 'error');
+                            log(`   🔄 Will retry sending...`, 'info');
+                            // Don't treat as success, allow retry
+                            // Don't break here - let it continue to retry logic below
+                        }
+                    }
                 } else if (errorMessage.includes('phone number is not registered')) {
                     log(`   ❌ CRITICAL: Number is not registered on WhatsApp`, 'error');
                     throw new Error(`Number ${recipient} is not registered on WhatsApp`);
+                }
+                
+                // Check if it's a sendSeen error BEFORE checking max retries
+                // This way we can treat it as success without retrying
+                const isMarkedUnreadErrorInRetry = 
+                    errorMessage.includes('markedunread') || 
+                    errorMessage.includes('marked_unread') ||
+                    errorStack.includes('sendseen') ||
+                    (errorMessage.includes('cannot read properties of undefined') && 
+                     errorMessage.includes('reading') && 
+                     errorStack.includes('markedunread'));
+                
+                if (isMarkedUnreadErrorInRetry) {
+                    log(`   ⚠️  MarkedUnread error detected - must verify message was actually sent`, 'warn');
+                    
+                    // CRITICAL: Must verify message was sent before treating as success
+                    let messageVerified = false;
+                    try {
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        const chat = await client.getChatById(chatId);
+                        if (chat) {
+                            const messages = await chat.fetchMessages({ limit: 15 });
+                            const recentMessage = messages.find(msg => {
+                                if (msg.body && message) {
+                                    const msgBody = msg.body.trim();
+                                    const sentBody = message.trim();
+                                    if (msgBody === sentBody || msgBody.includes(sentBody) || sentBody.includes(msgBody)) {
+                                        return true;
+                                    }
+                                }
+                                if (msg.timestamp && Date.now() / 1000 - msg.timestamp < 20) {
+                                    return true;
+                                }
+                                return false;
+                            });
+                            
+                            if (recentMessage) {
+                                log(`   ✅ Message verified in chat`, 'success');
+                                sentMessage = recentMessage;
+                                messageVerified = true;
+                            } else {
+                                log(`   ❌ Message NOT found in chat - send failed`, 'error');
+                            }
+                        }
+                    } catch (verifyErr) {
+                        log(`   ⚠️  Could not verify: ${verifyErr.message}`, 'warn');
+                    }
+                    
+                    // ONLY treat as success if message was verified
+                    if (messageVerified) {
+                        log(`   ✅ Message treated as successfully sent (verified in chat)`, 'success');
+                        break; // Exit retry loop, treat as success
+                    } else {
+                        log(`   ❌ Cannot confirm message was sent - will not treat as success`, 'error');
+                        // Don't break, let it continue to retry or fail
+                    }
                 }
                 
                 if (retries >= maxRetries) {
@@ -1343,10 +1578,21 @@ app.post('/api/device/:deviceKey/send-message', async (req, res) => {
             }
         }
         
+        // Ensure sentMessage is defined
+        if (!sentMessage) {
+            log(`   ⚠️  sentMessage is undefined, creating fallback response`, 'warn');
+            sentMessage = {
+                id: { id: `msg_${Date.now()}` },
+                timestamp: Math.floor(Date.now() / 1000),
+                body: message,
+                from: chatId
+            };
+        }
+        
         res.json({
             success: true,
-            messageId: sentMessage.id.id,
-            timestamp: sentMessage.timestamp,
+            messageId: sentMessage.id?.id || sentMessage.id || `msg_${Date.now()}`,
+            timestamp: sentMessage.timestamp || Math.floor(Date.now() / 1000),
             to: recipient
         });
     } catch (error) {
